@@ -82,7 +82,12 @@ echo "=== Seeding TLS material ==="
 # empty files the old curl-into-tee seeding left behind.
 sudo cp "$REPO_DIR/data/certbot/conf/options-ssl-nginx.conf" "$DATA_DIR/certbot/conf/"
 sudo cp "$REPO_DIR/data/certbot/conf/ssl-dhparams.pem" "$DATA_DIR/certbot/conf/"
-if [ ! -f "$LIVE_DIR/fullchain.pem" ]; then
+# Every test against certbot/conf/ needs sudo. certbot creates renewal/,
+# archive/ and live/ mode 0700 owned by root, and live/<domain>/*.pem are
+# symlinks into archive/. As xinxin, [ -f ] on those paths fails with EACCES and
+# reports "not found" for a certificate that is really there -- which regenerates
+# the placeholder and re-arms the sentinel on every run.
+if ! sudo test -f "$LIVE_DIR/fullchain.pem"; then
   echo "No certificate yet, generating a self-signed placeholder so nginx starts."
   sudo mkdir -p "$LIVE_DIR"
   sudo openssl req -x509 -nodes -newkey rsa:4096 -days 365 \
@@ -103,11 +108,11 @@ docker compose up -d --remove-orphans
 # survives is what produces a -0001 lineage -- certbot can no longer load the
 # old lineage to match it as a duplicate, but still cannot reuse its name. So
 # branch on the renewal conf, and pin the name with --cert-name.
-if [ -f "$RENEWAL_CONF" ]; then
+if sudo test -f "$RENEWAL_CONF"; then
   echo "=== Certificate for $DOMAIN already managed by certbot ==="
   echo "Leaving the existing lineage alone. If it is broken, remove it with:"
   echo "  cd $REPO_DIR && docker compose run --rm certbot delete --cert-name $DOMAIN"
-elif [ -f "$LIVE_DIR/.self-signed" ]; then
+elif sudo test -f "$LIVE_DIR/.self-signed"; then
   echo "=== Issuing certificate for $DOMAIN ==="
   echo "$DOMAIN must already resolve to this droplet's IP, or issuance will fail"
   echo "and count against the Let's Encrypt rate limit."
