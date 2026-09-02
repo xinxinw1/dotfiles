@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+set -o pipefail
 
 DEVICE=/dev/disk/by-id/scsi-0DO_Volume_thevenin-data
 DATA_DIR=/mnt/thevenin_data
@@ -74,13 +75,12 @@ echo "=== Seeding TLS material ==="
 # These two ship in the repo rather than being fetched from certbot's GitHub:
 # the upstream paths moved once already and silently 404'd, which is not a good
 # dependency for the one procedure that has to work on a fresh droplet.
-# The guards leave certbot's own updates to these files alone on a re-run.
-if [ ! -f "$DATA_DIR/certbot/conf/options-ssl-nginx.conf" ]; then
-  sudo cp "$REPO_DIR/data/certbot/conf/options-ssl-nginx.conf" "$DATA_DIR/certbot/conf/"
-fi
-if [ ! -f "$DATA_DIR/certbot/conf/ssl-dhparams.pem" ]; then
-  sudo cp "$REPO_DIR/data/certbot/conf/ssl-dhparams.pem" "$DATA_DIR/certbot/conf/"
-fi
+# Copied unconditionally: nothing on the host owns them. certbot only writes
+# options-ssl-nginx.conf through its nginx installer plugin, and this stack runs
+# certonly --webroot with no installer. Overwriting every run also repairs the
+# empty files the old curl-into-tee seeding left behind.
+sudo cp "$REPO_DIR/data/certbot/conf/options-ssl-nginx.conf" "$DATA_DIR/certbot/conf/"
+sudo cp "$REPO_DIR/data/certbot/conf/ssl-dhparams.pem" "$DATA_DIR/certbot/conf/"
 if [ ! -f "$LIVE_DIR/fullchain.pem" ]; then
   echo "No certificate yet, generating a self-signed placeholder so nginx starts."
   sudo mkdir -p "$LIVE_DIR"
