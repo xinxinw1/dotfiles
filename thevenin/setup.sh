@@ -7,6 +7,7 @@ DATA_DIR=/mnt/thevenin_data
 REPO_DIR="$HOME/git/thevenin-nginx"
 DOMAIN=new.xin-xin.me
 LIVE_DIR="$DATA_DIR/certbot/conf/live/$DOMAIN"
+RENEWAL_CONF="$DATA_DIR/certbot/conf/renewal/$DOMAIN.conf"
 
 echo "=== Waiting for the thevenin-data volume ==="
 echo "Attach the 'thevenin-data' block volume to this droplet in the"
@@ -96,17 +97,27 @@ echo "=== Starting the stack ==="
 docker compose pull
 docker compose up -d --remove-orphans
 
-if [ -f "$LIVE_DIR/.self-signed" ]; then
+# certbot derives the lineage name from renewal/<domain>.conf, not from
+# live/<domain>/: unique_lineage_name() opens that conf O_EXCL and falls back to
+# <domain>-0001 when it already exists. Deleting live/ while the renewal conf
+# survives is what produces a -0001 lineage -- certbot can no longer load the
+# old lineage to match it as a duplicate, but still cannot reuse its name. So
+# branch on the renewal conf, and pin the name with --cert-name.
+if [ -f "$RENEWAL_CONF" ]; then
+  echo "=== Certificate for $DOMAIN already managed by certbot ==="
+  echo "Leaving the existing lineage alone. If it is broken, remove it with:"
+  echo "  cd $REPO_DIR && docker compose run --rm certbot delete --cert-name $DOMAIN"
+elif [ -f "$LIVE_DIR/.self-signed" ]; then
   echo "=== Issuing certificate for $DOMAIN ==="
   echo "$DOMAIN must already resolve to this droplet's IP, or issuance will fail"
   echo "and count against the Let's Encrypt rate limit."
   read -r -p "Is DNS pointed here? [y/N] " reply
   if [ "$reply" = y ] || [ "$reply" = Y ]; then
-    # certbot treats an existing live/<domain>/ as a taken lineage name and
-    # would issue into live/<domain>-0001/ instead, which nothing references.
+    # Safe here precisely because no renewal conf exists, so there is no lineage
+    # to orphan. Still needed: new_lineage() errors on a non-empty live dir.
     sudo rm -rf "$LIVE_DIR"
     docker compose run --rm certbot certonly --webroot \
-      --webroot-path /var/www/certbot/ -d "$DOMAIN"
+      --webroot-path /var/www/certbot/ --cert-name "$DOMAIN" -d "$DOMAIN"
     docker compose restart webserver-secure
   else
     echo "Skipped. The stack is serving the self-signed placeholder on :443."
