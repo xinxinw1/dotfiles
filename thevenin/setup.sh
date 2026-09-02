@@ -82,12 +82,13 @@ echo "=== Seeding TLS material ==="
 # empty files the old curl-into-tee seeding left behind.
 sudo cp "$REPO_DIR/data/certbot/conf/options-ssl-nginx.conf" "$DATA_DIR/certbot/conf/"
 sudo cp "$REPO_DIR/data/certbot/conf/ssl-dhparams.pem" "$DATA_DIR/certbot/conf/"
-# Every test against certbot/conf/ needs sudo. certbot creates renewal/,
-# archive/ and live/ mode 0700 owned by root, and live/<domain>/*.pem are
-# symlinks into archive/. As xinxin, [ -f ] on those paths fails with EACCES and
-# reports "not found" for a certificate that is really there -- which regenerates
-# the placeholder and re-arms the sentinel on every run.
-if ! sudo test -f "$LIVE_DIR/fullchain.pem"; then
+# Leave the live directory alone if it exists at all, rather than testing for a
+# file inside it. certbot owns this path once a lineage exists, and its *.pem
+# entries are symlinks into archive/, which it creates mode 0700 root-owned --
+# so resolving one as xinxin fails with EACCES, and [ -f ] cannot tell "absent"
+# from "cannot stat". Testing the directory never follows those symlinks.
+# sudo because certbot also creates live/ and renewal/ mode 0700.
+if ! sudo test -d "$LIVE_DIR"; then
   echo "No certificate yet, generating a self-signed placeholder so nginx starts."
   sudo mkdir -p "$LIVE_DIR"
   sudo openssl req -x509 -nodes -newkey rsa:4096 -days 365 \
