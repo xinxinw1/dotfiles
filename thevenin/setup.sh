@@ -71,13 +71,15 @@ fi
 # starting the stack. Without this webserver-secure restart-loops until the
 # real certificate is issued.
 echo "=== Seeding TLS material ==="
+# These two ship in the repo rather than being fetched from certbot's GitHub:
+# the upstream paths moved once already and silently 404'd, which is not a good
+# dependency for the one procedure that has to work on a fresh droplet.
+# The guards leave certbot's own updates to these files alone on a re-run.
 if [ ! -f "$DATA_DIR/certbot/conf/options-ssl-nginx.conf" ]; then
-  curl -fsSL https://raw.githubusercontent.com/certbot/certbot/master/certbot-nginx/certbot_nginx/_internal/tls_configs/options-ssl-nginx.conf \
-    | sudo tee "$DATA_DIR/certbot/conf/options-ssl-nginx.conf" >/dev/null
+  sudo cp "$REPO_DIR/data/certbot/conf/options-ssl-nginx.conf" "$DATA_DIR/certbot/conf/"
 fi
 if [ ! -f "$DATA_DIR/certbot/conf/ssl-dhparams.pem" ]; then
-  curl -fsSL https://raw.githubusercontent.com/certbot/certbot/master/certbot/certbot/ssl-dhparams.pem \
-    | sudo tee "$DATA_DIR/certbot/conf/ssl-dhparams.pem" >/dev/null
+  sudo cp "$REPO_DIR/data/certbot/conf/ssl-dhparams.pem" "$DATA_DIR/certbot/conf/"
 fi
 if [ ! -f "$LIVE_DIR/fullchain.pem" ]; then
   echo "No certificate yet, generating a self-signed placeholder so nginx starts."
