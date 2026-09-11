@@ -6,7 +6,6 @@ DEVICE=/dev/disk/by-id/scsi-0DO_Volume_thevenin-data
 DATA_DIR=/mnt/thevenin_data
 REPO_DIR="$HOME/git/thevenin-nginx"
 DOMAIN=new.xin-xin.me
-LIVE_DIR="$DATA_DIR/certbot/conf/live/$DOMAIN"
 RENEWAL_CONF="$DATA_DIR/certbot/conf/renewal/$DOMAIN.conf"
 
 echo "=== Waiting for the thevenin-data volume ==="
@@ -68,59 +67,49 @@ if [ ! -f .env.secrets ]; then
   read -r -p "Press enter once you have saved it: "
 fi
 
-# nginx refuses to load conf-secure/ if any of the certificate, the key, the
-# ssl options file or the dhparams file is missing, so seed all four before
-# starting the stack. Without this webserver-secure restart-loops until the
-# real certificate is issued.
+# conf-secure/ includes these two from /etc/letsencrypt/, and certbot never
+# writes them under certonly --webroot, so nginx cannot load its config without
+# them even once a real certificate exists. They ship in the repo rather than
+# being fetched from certbot's GitHub: the upstream paths moved once already and
+# silently 404'd, which is not a good dependency for a fresh droplet. Copied
+# unconditionally -- nothing on the host owns them.
 echo "=== Seeding TLS material ==="
-# These two ship in the repo rather than being fetched from certbot's GitHub:
-# the upstream paths moved once already and silently 404'd, which is not a good
-# dependency for the one procedure that has to work on a fresh droplet.
-# Copied unconditionally: nothing on the host owns them. certbot only writes
-# options-ssl-nginx.conf through its nginx installer plugin, and this stack runs
-# certonly --webroot with no installer. Overwriting every run also repairs the
-# empty files the old curl-into-tee seeding left behind.
 sudo cp "$REPO_DIR/data/certbot/conf/options-ssl-nginx.conf" "$DATA_DIR/certbot/conf/"
 sudo cp "$REPO_DIR/data/certbot/conf/ssl-dhparams.pem" "$DATA_DIR/certbot/conf/"
-if [ ! -f "$LIVE_DIR/fullchain.pem" ]; then
-  echo "No certificate yet, generating a self-signed placeholder so nginx starts."
-  sudo mkdir -p "$LIVE_DIR"
-  sudo openssl req -x509 -nodes -newkey rsa:4096 -days 365 \
-    -keyout "$LIVE_DIR/privkey.pem" -out "$LIVE_DIR/fullchain.pem" \
-    -subj "/CN=$DOMAIN"
-  # Marks this lineage as disposable. Step "Issuing certificate" below keys
-  # off this file, not off the directory existing.
-  sudo touch "$LIVE_DIR/.self-signed"
+
+# sudo: certbot creates renewal/ mode 0700 root-owned, so a plain [ -f ] fails
+# with EACCES and cannot tell "no lineage" from "cannot look" -- which would
+# re-issue against an existing lineage.
+if sudo test -f "$RENEWAL_CONF"; then HAVE_LINEAGE=yes; else HAVE_LINEAGE=no; fi
+
+if [ "$HAVE_LINEAGE" = no ]; then
+  echo "No certificate for $DOMAIN yet. webserver-secure will restart-loop until"
+  echo "one is issued -- conf-secure/ needs fullchain.pem and privkey.pem to load."
+  echo "This is expected: :80 stays up to serve the ACME challenge, and the secure"
+  echo "container comes up on its own once the certificate lands."
 fi
 
 echo "=== Starting the stack ==="
 docker compose pull
 docker compose up -d --remove-orphans
 
-# certbot derives the lineage name from renewal/<domain>.conf, not from
-# live/<domain>/: unique_lineage_name() opens that conf O_EXCL and falls back to
-# <domain>-0001 when it already exists. Deleting live/ while the renewal conf
-# survives is what produces a -0001 lineage -- certbot can no longer load the
-# old lineage to match it as a duplicate, but still cannot reuse its name. So
-# branch on the renewal conf, and pin the name with --cert-name.
-if [ -f "$RENEWAL_CONF" ]; then
+if [ "$HAVE_LINEAGE" = yes ]; then
   echo "=== Certificate for $DOMAIN already managed by certbot ==="
   echo "Leaving the existing lineage alone. If it is broken, remove it with:"
   echo "  cd $REPO_DIR && docker compose run --rm certbot delete --cert-name $DOMAIN"
-elif [ -f "$LIVE_DIR/.self-signed" ]; then
+else
   echo "=== Issuing certificate for $DOMAIN ==="
   echo "$DOMAIN must already resolve to this droplet's IP, or issuance will fail"
   echo "and count against the Let's Encrypt rate limit."
   read -r -p "Is DNS pointed here? [y/N] " reply
   if [ "$reply" = y ] || [ "$reply" = Y ]; then
-    # Safe here precisely because no renewal conf exists, so there is no lineage
-    # to orphan. Still needed: new_lineage() errors on a non-empty live dir.
-    sudo rm -rf "$LIVE_DIR"
+    # --cert-name pins the lineage name. certbot otherwise derives it from
+    # renewal/<domain>.conf and falls back to <domain>-0001 if one exists.
     docker compose run --rm certbot certonly --webroot \
       --webroot-path /var/www/certbot/ --cert-name "$DOMAIN" -d "$DOMAIN"
     docker compose restart webserver-secure
   else
-    echo "Skipped. The stack is serving the self-signed placeholder on :443."
+    echo "Skipped. :443 stays down until a certificate is issued."
     echo "Re-run this script once DNS is pointed here."
   fi
 fi
