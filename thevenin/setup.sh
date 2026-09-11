@@ -2,41 +2,28 @@
 set -e
 set -o pipefail
 
-DEVICE=/dev/disk/by-id/scsi-0DO_Volume_thevenin-data
 DATA_DIR=/mnt/thevenin_data
 REPO_DIR="$HOME/git/thevenin-nginx"
 DOMAIN=new.xin-xin.me
 RENEWAL_CONF="$DATA_DIR/certbot/conf/renewal/$DOMAIN.conf"
 
-echo "=== Waiting for the thevenin-data volume ==="
-echo "Attach the 'thevenin-data' block volume to this droplet in the"
-echo "DigitalOcean control panel (Volumes -> thevenin-data -> Attach)."
-read -r -p "Press enter once you have attached it: "
+echo "=== Checking $DATA_DIR ==="
+# cloud-init puts the NFS share in /etc/fstab, so nothing here mounts it.
+# Touch the path first: that fstab entry uses x-systemd.automount, so the real
+# mount only happens on first access -- until then the path is an autofs stub
+# that mountpoint(1) reports as mounted either way, which is why the check
+# below asks findmnt for the filesystem type instead.
+ls "$DATA_DIR" >/dev/null 2>&1 || true
 
-for _ in $(seq 30); do
-  [ -e "$DEVICE" ] && break
-  sleep 2
-done
-
-if [ ! -e "$DEVICE" ]; then
-  echo "$DEVICE never appeared. Check that the volume is named thevenin-data" >&2
-  echo "and is attached to this droplet, then re-run this script." >&2
+if ! findmnt -t nfs,nfs4 "$DATA_DIR" >/dev/null; then
+  echo "$DATA_DIR is not an NFS mount. The share is mounted from the fstab" >&2
+  echo "entry written by thevenin/cloud-init.yaml; without it the stack would" >&2
+  echo "write certbot, text-edit and mysql data to the droplet's own disk and" >&2
+  echo "lose it with the droplet. Check the entry and the share:" >&2
+  echo "  grep thevenin_data /etc/fstab" >&2
+  echo "  sudo mount -a && findmnt $DATA_DIR" >&2
   exit 1
 fi
-
-# A volume created without a filesystem would mount as an empty overlay and
-# silently hide the data directory, so refuse rather than guess.
-if ! sudo blkid "$DEVICE" >/dev/null 2>&1; then
-  echo "$DEVICE has no filesystem. Format it first:" >&2
-  echo "  sudo mkfs.ext4 -F $DEVICE" >&2
-  exit 1
-fi
-
-echo "=== Mounting $DATA_DIR ==="
-sudo mkdir -p "$DATA_DIR"
-mountpoint -q "$DATA_DIR" || sudo mount -o discard,defaults,noatime "$DEVICE" "$DATA_DIR"
-grep -q "$DATA_DIR" /etc/fstab \
-  || echo "$DEVICE $DATA_DIR ext4 defaults,nofail,discard 0 0" | sudo tee -a /etc/fstab
 
 echo "=== Creating data directories ==="
 sudo mkdir -p "$DATA_DIR/certbot/conf" "$DATA_DIR/certbot/www" \
