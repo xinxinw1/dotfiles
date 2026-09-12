@@ -183,12 +183,14 @@ if [ "$HAVE_LINEAGE" = no ]; then
 fi
 
 echo "=== Building and starting the stack ==="
-# --ignore-buildable: main-website and text-edit are built from the sibling
-# checkouts and have no registry image, which a plain pull errors on.
+# --pull always refreshes the registry images; main-website and text-edit are
+# built from the sibling checkouts and have no registry image, but compose
+# builds those instead of erroring on the missing pull.
 # --build on every run so source that sync_repo just pulled actually ships; with
-# nothing changed it is all layer cache and costs seconds.
-docker compose pull --ignore-buildable
-docker compose up -d --build --remove-orphans
+# nothing changed it is all layer cache and costs seconds. No --no-cache (it
+# would discard that cache) and no --force-recreate (compose already recreates
+# whatever changed; forcing it just bounces the containers that did not).
+docker compose up -d --build --pull always --remove-orphans
 
 if [ "$HAVE_LINEAGE" = yes ]; then
   echo "=== Certificate for $DOMAIN already managed by certbot ==="
