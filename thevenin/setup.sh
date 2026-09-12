@@ -2,91 +2,19 @@
 set -e
 set -o pipefail
 
-# Which box this is. thevenin and thevenin-dev share this script --
-# thevenin-dev/ is a symlink to thevenin/ -- so it has to work out which of the
-# two it is on. cloud-init writes /etc/host-type at bootstrap, before anything
-# here runs, so there is nothing to pass in and no caller that does.
-# SETUP_HOST_TYPE overrides it for a dry run somewhere that is neither box,
-# same as SETUP_NONINTERACTIVE below.
-HOST_TYPE_FILE="/etc/host-type"
-
-if [ -n "${SETUP_HOST_TYPE:-}" ]; then
-  HOST_TYPE="$SETUP_HOST_TYPE"
-elif [ -r "$HOST_TYPE_FILE" ]; then
-  HOST_TYPE="$(tr -d '[:space:]' < "$HOST_TYPE_FILE")"
-fi
-
-if [ -z "$HOST_TYPE" ]; then
-  echo "Cannot tell what host this is: $HOST_TYPE_FILE is missing or empty." >&2
-  echo "It is written by cloud-init at bootstrap; on a droplet that file not" >&2
-  echo "being there is the problem to fix. Set SETUP_HOST_TYPE to override." >&2
-  exit 1
-fi
-
-# The only thing that differs between the two. Both mount their own NFS share at
-# the same path and run the same stack from the same repo; they answer on
-# different names.
-case "$HOST_TYPE" in
-  thevenin)     DOMAIN=new.xin-xin.me ;;
-  thevenin-dev) DOMAIN=xin-xin-test.me ;;
-  *)
-    echo "This script runs on thevenin and thevenin-dev, not '$HOST_TYPE'." >&2
-    exit 1
-    ;;
-esac
-
-DATA_DIR=/mnt/thevenin_data
-REPO_DIR="$HOME/git/thevenin-nginx"
-RENEWAL_CONF="$DATA_DIR/certbot/conf/renewal/$DOMAIN.conf"
-
-# Whether there is a human on the other end. $HOST_TYPE/cloud-init.yaml runs this
-# from runcmd at bootstrap, where stdin is not a tty, and the steps below that
-# need an answer cannot be guessed on a human's behalf -- answering the DNS
-# question wrong burns a Let's Encrypt rate-limit slot. Set
-# SETUP_NONINTERACTIVE=1 to take the unattended path from a terminal.
-if [ -n "${SETUP_NONINTERACTIVE:-}" ] || [ ! -t 0 ]; then
-  INTERACTIVE=no
-else
-  INTERACTIVE=yes
-fi
-
-# Stop short of a prompt nobody can answer. Reading EOF off /dev/null instead
-# would abort the script anyway -- `read` returns non-zero at EOF and `set -e`
-# takes it from there -- but say nothing about what is missing.
-stop_for_human() {
-  echo
-  echo "=== Stopping: this step needs a human ==="
-  printf '%s\n' "$@"
-  echo
-  echo "Re-run the script from a terminal once that is sorted:"
-  echo "  ~/setup.sh"
-  exit 0
-}
+# Host bootstrap. $HOST_TYPE/cloud-init.yaml runs this from runcmd at bootstrap,
+# where stdin is not a tty, so nothing here may ask a question: this script does
+# only what a fresh droplet needs, and does it unattended.
+#
+# Everything that belongs to the NFS share rather than to this droplet -- the
+# data directories, the TLS material, the certificate -- lives in ~/init-data.sh
+# instead. The share outlives any one box, so that is run by hand once per share
+# and not at bootstrap. Re-running this script is harmless.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/common.sh"
 
 echo "=== Checking $DATA_DIR ==="
-# cloud-init puts the NFS share in /etc/fstab, so nothing here mounts it.
-# Touch the path first: that fstab entry uses x-systemd.automount, so the real
-# mount only happens on first access -- until then the path is an autofs stub
-# that mountpoint(1) reports as mounted either way, which is why the check
-# below asks findmnt for the filesystem type instead.
-ls "$DATA_DIR" >/dev/null 2>&1 || true
-
-if ! findmnt -t nfs,nfs4 "$DATA_DIR" >/dev/null; then
-  echo "$DATA_DIR is not an NFS mount. The share is mounted from the fstab" >&2
-  echo "entry written by $HOST_TYPE/cloud-init.yaml; without it the stack would" >&2
-  echo "write certbot, text-edit and mysql data to the droplet's own disk and" >&2
-  echo "lose it with the droplet. Check the entry and the share:" >&2
-  echo "  grep thevenin_data /etc/fstab" >&2
-  echo "  sudo mount -a && findmnt $DATA_DIR" >&2
-  exit 1
-fi
-
-echo "=== Creating data directories ==="
-sudo mkdir -p "$DATA_DIR/certbot/conf" "$DATA_DIR/certbot/www" \
-  "$DATA_DIR/text-edit-data" "$DATA_DIR/mysql/data"
-# text-edit serves as an unknown uid inside its container and needs to write
-# uploads here; the mysql image chowns its own datadir on first init.
-sudo chmod 0777 "$DATA_DIR/text-edit-data"
+require_data_mount
 
 echo "=== Cloning thevenin-nginx into $REPO_DIR ==="
 mkdir -p "$HOME/git"
@@ -109,77 +37,53 @@ DATA_DIR=$DATA_DIR
 SITE_DOMAIN=$DOMAIN
 EOF
 
+# Kept here rather than in init-data.sh even though it is the mysql password:
+# docker compose reads it as an env_file and will not start the stack without
+# it, and it lives on the droplet's own disk, not on the share. Only a fresh
+# mysql data directory honors it, so on a rebuild against an existing share the
+# newly generated one is written but never takes effect -- the share's own
+# password stays in force, and is the one to keep.
 if [ ! -f .env.secrets ]; then
   echo "=== Generating .env.secrets ==="
   MYSQL_ROOT_PASSWORD="$(openssl rand -base64 24)"
   printf 'MYSQL_ROOT_PASSWORD=%s\n' "$MYSQL_ROOT_PASSWORD" > .env.secrets
   chmod 600 .env.secrets
-  echo "Generated a mysql root password. Save it somewhere safe now:"
+  echo "Generated a mysql root password. Save it somewhere safe:"
   echo "  $MYSQL_ROOT_PASSWORD"
   echo "(It only takes effect on a fresh mysql data directory. An existing"
-  echo "volume keeps whatever password it already has.)"
-  if [ "$INTERACTIVE" = yes ]; then
-    read -r -p "Press enter once you have saved it: "
-  else
-    # Nothing to decide here, so an unattended run has no reason to stop: the
-    # prompt only exists so the password does not scroll past a human. It stays
-    # readable in the file either way.
-    echo "Unattended run, so nothing to acknowledge. The password stays in"
-    echo "  $REPO_DIR/.env.secrets"
-  fi
+  echo "share keeps whatever password it already has.) It stays readable in"
+  echo "  $REPO_DIR/.env.secrets"
 fi
 
-# templates-secure/ includes these two from /etc/letsencrypt/, and certbot never
-# writes them under certonly --webroot, so nginx cannot load its config without
-# them even once a real certificate exists. They ship in the repo rather than
-# being fetched from certbot's GitHub: the upstream paths moved once already and
-# silently 404'd, which is not a good dependency for a fresh droplet. Copied
-# unconditionally -- nothing on the host owns them.
-echo "=== Seeding TLS material ==="
-sudo cp "$REPO_DIR/data/certbot/conf/options-ssl-nginx.conf" "$DATA_DIR/certbot/conf/"
-sudo cp "$REPO_DIR/data/certbot/conf/ssl-dhparams.pem" "$DATA_DIR/certbot/conf/"
-
-# sudo: certbot creates renewal/ mode 0700 root-owned, so a plain [ -f ] fails
-# with EACCES and cannot tell "no lineage" from "cannot look" -- which would
-# re-issue against an existing lineage.
-if sudo test -f "$RENEWAL_CONF"; then HAVE_LINEAGE=yes; else HAVE_LINEAGE=no; fi
-
-if [ "$HAVE_LINEAGE" = no ]; then
-  echo "No certificate for $DOMAIN yet. webserver-secure will restart-loop until"
-  echo "one is issued -- templates-secure/ needs fullchain.pem and privkey.pem to load."
-  echo "This is expected: :80 stays up to serve the ACME challenge, and the secure"
-  echo "container comes up on its own once the certificate lands."
+# Starting the stack against an uninitialized share would have docker create the
+# bind-mount sources itself, root-owned and mode 0755 -- which text-edit, running
+# as an unknown uid, cannot write uploads into. Better to stop and say so: the
+# share needs a human for the certificate anyway, and init-data.sh brings the
+# stack up itself once it has seeded what the containers expect to find.
+if [ ! -f "$SEEDED_SSL_CONF" ]; then
+  echo
+  echo "=== Stopping: $DATA_DIR has not been initialized ==="
+  echo "The droplet is ready -- checkout, .env and .env.secrets are in place --"
+  echo "but the share behind $DATA_DIR has nothing in it yet. That part needs a"
+  echo "human, so it is not done at bootstrap. Run it from a terminal:"
+  echo "  ~/init-data.sh"
+  echo "It creates the data directories, seeds the TLS material, starts the"
+  echo "stack and issues the certificate. This script takes over from the next"
+  echo "boot on."
+  exit 0
 fi
 
 echo "=== Starting the stack ==="
 docker compose pull
 docker compose up -d --remove-orphans
 
-if [ "$HAVE_LINEAGE" = yes ]; then
-  echo "=== Certificate for $DOMAIN already managed by certbot ==="
-  echo "Leaving the existing lineage alone. If it is broken, remove it with:"
-  echo "  cd $REPO_DIR && docker compose run --rm certbot delete --cert-name $DOMAIN"
-else
-  echo "=== Issuing certificate for $DOMAIN ==="
-  echo "$DOMAIN must already resolve to this droplet's IP, or issuance will fail"
-  echo "and count against the Let's Encrypt rate limit."
-  if [ "$INTERACTIVE" = no ]; then
-    stop_for_human \
-      "Point $DOMAIN at this droplet's IP before a certificate can be issued." \
-      "The stack is up and :80 is already serving the ACME challenge, so" \
-      "everything but :443 works in the meantime."
-  fi
-  read -r -p "Is DNS pointed here? [y/N] " reply
-  if [ "$reply" = y ] || [ "$reply" = Y ]; then
-    # --cert-name pins the lineage name. certbot otherwise derives it from
-    # renewal/<domain>.conf and falls back to <domain>-0001 if one exists.
-    docker compose run --rm certbot certonly --webroot \
-      --webroot-path /var/www/certbot/ --cert-name "$DOMAIN" -d "$DOMAIN"
-    docker compose restart webserver-secure
-  else
-    echo "Skipped. :443 stays down until a certificate is issued."
-    echo "Re-run this script once DNS is pointed here."
-  fi
+if ! sudo test -f "$RENEWAL_CONF"; then
+  echo "=== No certificate for $DOMAIN yet ==="
+  echo "webserver-secure will restart-loop until one is issued -- templates-secure/"
+  echo "needs fullchain.pem and privkey.pem to load. :80 stays up to serve the ACME"
+  echo "challenge, and the secure container comes up on its own once the"
+  echo "certificate lands. To issue one:"
+  echo "  ~/init-data.sh"
 fi
 
 echo "=== Setup complete ==="
