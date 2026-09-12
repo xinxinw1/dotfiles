@@ -182,15 +182,13 @@ if [ "$HAVE_LINEAGE" = no ]; then
   echo "container comes up on its own once the certificate lands."
 fi
 
-echo "=== Building and starting the stack ==="
-# --pull always refreshes the registry images; main-website and text-edit are
-# built from the sibling checkouts and have no registry image, but compose
-# builds those instead of erroring on the missing pull.
-# --build on every run so source that sync_repo just pulled actually ships; with
-# nothing changed it is all layer cache and costs seconds. No --no-cache (it
-# would discard that cache) and no --force-recreate (compose already recreates
-# whatever changed; forcing it just bounces the containers that did not).
-docker compose up -d --build --pull always --remove-orphans
+# Builds and starts everything -- including main-website and text-edit from the
+# source sync_repo just pulled -- then restarts the two nginx containers so they
+# re-resolve those rebuilt containers, which they otherwise answer 502 for on
+# their old IPs. It ships with the compose file and explains both halves; it
+# prints its own section headers. Run from the checkout rather than through
+# ~/deploy.sh, which only exists to find this same script from anywhere.
+./deploy.sh
 
 if [ "$HAVE_LINEAGE" = yes ]; then
   echo "=== Certificate for $DOMAIN already managed by certbot ==="
