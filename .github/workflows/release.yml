@@ -1,0 +1,38 @@
+name: Attach installer to release
+
+# thevenin's cloud-init curls the installer straight from
+#   https://github.com/xinxinw1/dotfiles/releases/latest/download/install-dotfiles.sh
+# and that URL only resolves if the file is attached to the release as an asset
+# -- GitHub serves no source-tree file at "latest" by any other route. A release
+# without this asset is a release thevenin cannot bootstrap from, so this runs on
+# every publish rather than being something to remember.
+on:
+  release:
+    types: [published]
+  # Releases here are cut by hand, so this is the way to fix up one that was
+  # published while the workflow was broken, or one from before it existed.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the installer to
+        required: true
+
+permissions:
+  contents: write # gh release upload writes to the release
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      # The tag, not main: the asset has to be the installer as of that release,
+      # which is the whole point of a droplet pinning to it.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+
+      # --clobber so a re-run replaces the asset instead of failing on it.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ inputs.tag || github.event.release.tag_name }}" \
+            install-dotfiles.sh --clobber

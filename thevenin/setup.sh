@@ -23,12 +23,13 @@ if [ -z "$HOST_TYPE" ]; then
   exit 1
 fi
 
-# The only thing that differs between the two. Both mount their own NFS share at
-# the same path and run the same stack from the same repo; they answer on
-# different names.
+# What differs between the two. Both mount their own NFS share at the same path
+# and run the same stack from the same repos; they answer on different names,
+# and dev tracks those repos' default branches while production sticks to what
+# was released. See sync_repo below.
 case "$HOST_TYPE" in
-  thevenin)     DOMAIN=new.xin-xin.me ;;
-  thevenin-dev) DOMAIN=xin-xin-test.me ;;
+  thevenin)     DOMAIN=new.xin-xin.me;  PIN_RELEASES=yes ;;
+  thevenin-dev) DOMAIN=xin-xin-test.me; PIN_RELEASES=no  ;;
   *)
     echo "This script runs on thevenin and thevenin-dev, not '$HOST_TYPE'." >&2
     exit 1
@@ -52,6 +53,29 @@ if [ -n "${SETUP_NONINTERACTIVE:-}" ] || [ ! -t 0 ]; then
 else
   INTERACTIVE=yes
 fi
+
+# GitHub redirects /releases/latest to /releases/tag/<tag> for the release it has
+# marked latest -- drafts and prereleases are skipped, which is the point of
+# asking it rather than version-sorting the tags here. -o /dev/null throws away
+# the page; %{url_effective} is where -L finally landed. The same function lives
+# in install-dotfiles.sh: that one is curl'd standalone at bootstrap and has
+# nothing to source from, so the two copies are the cost of it staying a single
+# self-contained file.
+latest_release_tag() {
+  local url
+  if ! url="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+        "https://github.com/$1/releases/latest")"; then
+    echo "Could not reach GitHub to resolve the latest release of $1." >&2
+    return 1
+  fi
+  case "$url" in
+    */releases/tag/*) printf '%s\n' "${url##*/releases/tag/}" ;;
+    *)
+      echo "$1 has no published release (landed on $url)." >&2
+      return 1
+      ;;
+  esac
+}
 
 # Stop short of a prompt nobody can answer. Reading EOF off /dev/null instead
 # would abort the script anyway -- `read` returns non-zero at EOF and `set -e`
@@ -102,23 +126,42 @@ if ! sudo test -f "$DATA_DIR/xin-xin-me/email-config.json"; then
   echo '{}' | sudo tee "$DATA_DIR/xin-xin-me/email-config.json" >/dev/null
 fi
 
-# Clone or fast-forward one of xinxinw1's public repos under $GIT_ROOT.
+# Clone or update one of xinxinw1's public repos under $GIT_ROOT.
 # docker-compose.yml builds main-website and text-edit from ../xin-xin.me and
 # ../text-edit relative to itself, so all three have to be siblings here.
 #
-# --recurse-submodules is unconditional rather than per-repo: xin-xin.me carries
-# its static/code/* demos as submodules and its Dockerfile copies the working
-# tree, so an un-inited submodule quietly builds an image with an empty
-# directory. The explicit update afterwards catches submodules added upstream
-# since the clone, which --recurse-submodules on pull alone does not.
+# Production takes each repo's latest release and dev takes its default branch,
+# which is the whole of the difference between what the two boxes run. A tag
+# checkout is a detached HEAD, so this cannot be a `git pull`: it fetches first
+# and then decides what to be at, which also means it moves a box between the two
+# in either direction without anyone checking anything out by hand.
+#
+# The submodule update is unconditional and comes last, after the checkout that
+# decides which submodule commits apply: xin-xin.me carries its static/code/*
+# demos as submodules and its Dockerfile copies the working tree, so an un-inited
+# submodule quietly builds an image with an empty directory. Running it every
+# time also catches submodules added upstream since the clone.
 sync_repo() {
-  local name="$1" dir="$GIT_ROOT/$1"
+  local name="$1" dir="$GIT_ROOT/$1" ref
   if [ -d "$dir/.git" ]; then
-    git -C "$dir" pull --ff-only --recurse-submodules
-    git -C "$dir" submodule update --init --recursive
+    git -C "$dir" fetch --tags --prune origin
   else
-    git clone --recurse-submodules "https://github.com/xinxinw1/$name.git" "$dir"
+    git clone "https://github.com/xinxinw1/$name.git" "$dir"
   fi
+  # Creates refs/remotes/origin/HEAD as well as refreshing it, so the branch
+  # case below can rely on it in a clone that predates this.
+  git -C "$dir" remote set-head origin --auto >/dev/null
+
+  if [ "$PIN_RELEASES" = yes ]; then
+    ref="$(latest_release_tag "xinxinw1/$name")"
+    git -C "$dir" checkout --quiet --detach "refs/tags/$ref"
+  else
+    ref="$(git -C "$dir" symbolic-ref --short refs/remotes/origin/HEAD)"
+    git -C "$dir" checkout --quiet "${ref#origin/}"
+    git -C "$dir" merge --ff-only "$ref"
+  fi
+  git -C "$dir" submodule update --init --recursive
+  echo "$name @ $(git -C "$dir" describe --tags --always)"
 }
 
 echo "=== Cloning the stack and app repos into $GIT_ROOT ==="
