@@ -2,21 +2,24 @@
 set -e
 set -o pipefail
 
-# Which box this is. Same contract install-dotfiles.sh uses: cloud-init writes
-# /etc/host-type at bootstrap, and an explicit argument still wins. thevenin and
-# thevenin-dev share this script -- thevenin-dev/ is a symlink to thevenin/ --
-# so it has to work out which of the two it is on.
+# Which box this is. thevenin and thevenin-dev share this script --
+# thevenin-dev/ is a symlink to thevenin/ -- so it has to work out which of the
+# two it is on. cloud-init writes /etc/host-type at bootstrap, before anything
+# here runs, so there is nothing to pass in and no caller that does.
+# SETUP_HOST_TYPE overrides it for a dry run somewhere that is neither box,
+# same as SETUP_NONINTERACTIVE below.
 HOST_TYPE_FILE="/etc/host-type"
 
-if [ -n "$1" ]; then
-  HOST_TYPE="$1"
+if [ -n "${SETUP_HOST_TYPE:-}" ]; then
+  HOST_TYPE="$SETUP_HOST_TYPE"
 elif [ -r "$HOST_TYPE_FILE" ]; then
   HOST_TYPE="$(tr -d '[:space:]' < "$HOST_TYPE_FILE")"
 fi
 
 if [ -z "$HOST_TYPE" ]; then
-  echo "Usage: $0 [host-type]" >&2
-  echo "No host type given and $HOST_TYPE_FILE is missing or empty." >&2
+  echo "Cannot tell what host this is: $HOST_TYPE_FILE is missing or empty." >&2
+  echo "It is written by cloud-init at bootstrap; on a droplet that file not" >&2
+  echo "being there is the problem to fix. Set SETUP_HOST_TYPE to override." >&2
   exit 1
 fi
 
