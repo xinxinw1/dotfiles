@@ -36,7 +36,10 @@ case "$HOST_TYPE" in
 esac
 
 DATA_DIR=/mnt/thevenin_data
-REPO_DIR="$HOME/git/thevenin-nginx"
+# Not GIT_DIR: git reads that one out of the environment and every git call
+# below would look for its repository there.
+GIT_ROOT="$HOME/git"
+REPO_DIR="$GIT_ROOT/thevenin-nginx"
 RENEWAL_CONF="$DATA_DIR/certbot/conf/renewal/$DOMAIN.conf"
 
 # Whether there is a human on the other end. $HOST_TYPE/cloud-init.yaml runs this
@@ -83,18 +86,46 @@ fi
 
 echo "=== Creating data directories ==="
 sudo mkdir -p "$DATA_DIR/certbot/conf" "$DATA_DIR/certbot/www" \
-  "$DATA_DIR/text-edit-data" "$DATA_DIR/mysql/data"
+  "$DATA_DIR/text-edit-data" "$DATA_DIR/mysql/data" \
+  "$DATA_DIR/xin-xin-me/music" "$DATA_DIR/xin-xin-me/files"
 # text-edit serves as an unknown uid inside its container and needs to write
 # uploads here; the mysql image chowns its own datadir on first init.
 sudo chmod 0777 "$DATA_DIR/text-edit-data"
 
-echo "=== Cloning thevenin-nginx into $REPO_DIR ==="
-mkdir -p "$HOME/git"
-if [ -d "$REPO_DIR/.git" ]; then
-  git -C "$REPO_DIR" pull --ff-only
-else
-  git clone https://github.com/xinxinw1/thevenin-nginx.git "$REPO_DIR"
+# xin-xin.me keeps static/music, static/files and email-config.json out of git,
+# so the image built below has none of them and docker-compose.yml mounts all
+# three from here. The two directories above stay empty until someone copies the
+# real content onto the share; the file has to exist as a file, because docker
+# answers a missing single-file bind mount by creating a directory and node
+# cannot require() one. Seeded once and never overwritten.
+if ! sudo test -f "$DATA_DIR/xin-xin-me/email-config.json"; then
+  echo '{}' | sudo tee "$DATA_DIR/xin-xin-me/email-config.json" >/dev/null
 fi
+
+# Clone or fast-forward one of xinxinw1's public repos under $GIT_ROOT.
+# docker-compose.yml builds main-website and text-edit from ../xin-xin.me and
+# ../text-edit relative to itself, so all three have to be siblings here.
+#
+# --recurse-submodules is unconditional rather than per-repo: xin-xin.me carries
+# its static/code/* demos as submodules and its Dockerfile copies the working
+# tree, so an un-inited submodule quietly builds an image with an empty
+# directory. The explicit update afterwards catches submodules added upstream
+# since the clone, which --recurse-submodules on pull alone does not.
+sync_repo() {
+  local name="$1" dir="$GIT_ROOT/$1"
+  if [ -d "$dir/.git" ]; then
+    git -C "$dir" pull --ff-only --recurse-submodules
+    git -C "$dir" submodule update --init --recursive
+  else
+    git clone --recurse-submodules "https://github.com/xinxinw1/$name.git" "$dir"
+  fi
+}
+
+echo "=== Cloning the stack and app repos into $GIT_ROOT ==="
+mkdir -p "$GIT_ROOT"
+sync_repo thevenin-nginx
+sync_repo xin-xin.me
+sync_repo text-edit
 
 cd "$REPO_DIR"
 
@@ -151,9 +182,13 @@ if [ "$HAVE_LINEAGE" = no ]; then
   echo "container comes up on its own once the certificate lands."
 fi
 
-echo "=== Starting the stack ==="
-docker compose pull
-docker compose up -d --remove-orphans
+echo "=== Building and starting the stack ==="
+# --ignore-buildable: main-website and text-edit are built from the sibling
+# checkouts and have no registry image, which a plain pull errors on.
+# --build on every run so source that sync_repo just pulled actually ships; with
+# nothing changed it is all layer cache and costs seconds.
+docker compose pull --ignore-buildable
+docker compose up -d --build --remove-orphans
 
 if [ "$HAVE_LINEAGE" = yes ]; then
   echo "=== Certificate for $DOMAIN already managed by certbot ==="
