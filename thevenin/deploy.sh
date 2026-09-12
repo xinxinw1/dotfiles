@@ -14,7 +14,9 @@ set -o pipefail
 # thevenin-dev/ is a symlink to thevenin/, and the checkout is at the same path
 # on both.
 #
-# Arguments are passed straight through.
+# Arguments are passed straight through, for the env file the stack's script
+# explains: a droplet has the .env ~/setup.sh generates, so nothing is normally
+# needed here, but `~/deploy.sh --env-file ...` works for a throwaway domain.
 GIT_ROOT="$HOME/git"
 REPO_DIR="$GIT_ROOT/thevenin-nginx"
 SCRIPT="$REPO_DIR/deploy.sh"
